@@ -42,7 +42,7 @@ func main() {
 	logrus.SetLevel(logrus.DebugLevel)
 	kingpin.Parse()
 
-	const addr = "ws://127.0.0.1:7781/"
+	const addr = "ws://127.0.0.1:8080/"
 	logrus.Infof("Connecting to %s...", addr)
 	for {
 		conn, err := wsrpc.Dial(addr)
