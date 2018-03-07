@@ -20,30 +20,32 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/Percona-Lab/pmm-api/gateway"
 	"github.com/Percona-Lab/wsrpc"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/Percona-Lab/pmm-agent/tunnel"
+	"github.com/Percona-Lab/pmm-api/agent"
+	"github.com/Percona-Lab/pmm-api/gateway"
 )
 
 func handleConn(conn *wsrpc.Conn) {
+	logrus.Info("Connected!")
 	defer conn.Close()
 
-	server := new(tunnel.Service)
-	go func() {
-		err := gateway.NewServiceDispatcher(conn, server).Run()
-		logrus.Infof("Server exited with %v", err)
-	}()
+	server := tunnel.NewService(gateway.NewServiceClient(conn))
+	err := agent.NewServiceDispatcher(conn, server).Run()
+	logrus.Infof("Server exited with %v", err)
 }
 
 func main() {
 	logrus.SetLevel(logrus.DebugLevel)
 	kingpin.Parse()
 
+	const addr = "ws://127.0.0.1:7781/"
+	logrus.Infof("Connecting to %s...", addr)
 	for {
-		conn, err := wsrpc.Dial("ws://127.0.0.1:7781/")
+		conn, err := wsrpc.Dial(addr)
 		if err != nil {
 			logrus.Error(err)
 			delay := time.Duration(rand.Float64()*2.0*float64(time.Second)) + time.Second
