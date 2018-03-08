@@ -45,7 +45,7 @@ func main() {
 	const addr = "ws://127.0.0.1:8080/"
 	logrus.Infof("Connecting to %s...", addr)
 	for {
-		conn, err := wsrpc.Dial(addr)
+		conn, _, err := wsrpc.Dial(addr, nil)
 		if err != nil {
 			logrus.Error(err)
 			delay := time.Duration(rand.Float64()*2.0*float64(time.Second)) + time.Second
