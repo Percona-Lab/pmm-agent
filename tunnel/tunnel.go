@@ -107,6 +107,10 @@ func (s *Service) runTunnel(ctx context.Context, stream agent.Tunnels_MakeClient
 				l.Errorf("Got error, exiting: %s.", data.Error)
 				return
 			}
+			if data.Closed {
+				l.Info("Closed, exiting.")
+				return
+			}
 		}
 	}()
 
@@ -122,29 +126,31 @@ func (s *Service) runTunnel(ctx context.Context, stream agent.Tunnels_MakeClient
 		for {
 			b := make([]byte, 4096)
 			n, readErr := conn.Read(b)
-			l.Debugf("Read %d bytes.", n)
-			var readErrS string
-			if readErr != nil {
-				readErrS = readErr.Error()
+			l.Debugf("Read %d bytes, read error %v.", n, readErr)
+			data := &agent.TunnelsData{
+				Data: b[:n],
+			}
+			switch readErr {
+			case nil:
+				// nothing
+			case io.EOF:
+				l.Info("Read closed.")
+				data.Closed = true
+			default:
+				l.Errorf("Failed to read: %s.", readErr)
+				data.Closed = true
+				data.Error = readErr.Error()
 			}
 			env := &agent.TunnelsEnvelopeFromAgent{
 				Payload: &agent.TunnelsEnvelopeFromAgent_Data{
-					Data: &agent.TunnelsData{
-						Error: readErrS,
-						Data:  b[:n],
-					},
+					Data: data,
 				},
 			}
 			if err := stream.Send(env); err != nil {
 				l.Errorf("Failed to send message: %s.", err)
 				return
 			}
-			if readErr != nil {
-				if readErr == io.EOF {
-					l.Info("Read closed.")
-				} else {
-					l.Errorf("Failed to read: %s.", readErr)
-				}
+			if data.Closed {
 				return
 			}
 		}

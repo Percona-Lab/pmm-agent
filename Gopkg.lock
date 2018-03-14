@@ -5,7 +5,7 @@
   branch = "drop-nginx"
   name = "github.com/Percona-Lab/pmm-api"
   packages = ["agent"]
-  revision = "a4afd99eeeeeed4ef50a648ec07923ab9120d3dd"
+  revision = "e848ec7321636d47b90f69eda58749cfab3d9cff"
 
 [[projects]]
   branch = "master"
