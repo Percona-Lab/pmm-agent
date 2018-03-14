@@ -17,42 +17,71 @@
 package main
 
 import (
+	"context"
+	"log"
 	"math/rand"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
-	"github.com/Percona-Lab/wsrpc"
+	"github.com/Percona-Lab/pmm-api/agent"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/Percona-Lab/pmm-agent/tunnel"
-	"github.com/Percona-Lab/pmm-api/agent"
-	"github.com/Percona-Lab/pmm-api/gateway"
 )
 
-func handleConn(conn *wsrpc.Conn) {
-	logrus.Info("Connected!")
-	defer conn.Close()
-
-	server := tunnel.NewService(gateway.NewServiceClient(conn))
-	err := agent.NewServiceDispatcher(conn, server).Run()
-	logrus.Infof("Server exited with %v", err)
-}
+const (
+	uuid = "baf4e293-9f1c-4b3f-9244-02c8f3f37d9d"
+)
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
+	log.SetFlags(0)
+	log.SetPrefix("stdlog: ")
 	logrus.SetLevel(logrus.DebugLevel)
 	kingpin.Parse()
 
-	const addr = "ws://127.0.0.1:8080/"
-	logrus.Infof("Connecting to %s...", addr)
-	for {
-		conn, _, err := wsrpc.Dial(addr, nil)
-		if err != nil {
-			logrus.Error(err)
-			delay := time.Duration(rand.Float64()*2.0*float64(time.Second)) + time.Second
-			time.Sleep(delay)
-			continue
-		}
+	l := logrus.WithField("component", "main")
+	defer l.Info("Done.")
+	ctx, cancel := context.WithCancel(context.Background())
 
-		handleConn(conn)
+	// handle termination signals
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		s := <-signals
+		signal.Stop(signals)
+		l.Warnf("Got %v (%d) signal, shutting down...", s, s)
+		cancel()
+	}()
+
+	// Connect to pmm-gateway. Once gRPC connection is established, client reconnects automatically.
+	const addr = "127.0.0.1:8080"
+	l.Infof("Connecting to %s...", addr)
+	var conn *grpc.ClientConn
+	var err error
+	for conn == nil {
+		// TODO configure backoff
+		// TODO configure TLS
+		conn, err = grpc.Dial(addr, grpc.WithInsecure())
+		if err != nil {
+			l.Error(err)
+		}
 	}
+	defer conn.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		agentCtx := metadata.AppendToOutgoingContext(ctx, "pmm-agent-uuid", uuid)
+		tunnel.NewService(agent.NewTunnelsClient(conn)).Run(agentCtx)
+	}()
+
+	wg.Wait()
 }

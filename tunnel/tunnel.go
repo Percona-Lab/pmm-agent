@@ -17,95 +17,170 @@
 package tunnel
 
 import (
-	"fmt"
+	"context"
 	"net"
 	"sync"
-	"time"
-
-	"github.com/sirupsen/logrus"
 
 	"github.com/Percona-Lab/pmm-api/agent"
-	"github.com/Percona-Lab/pmm-api/gateway"
+	"github.com/sirupsen/logrus"
 )
 
 type Service struct {
-	client gateway.ServiceClient
-
-	rw      sync.RWMutex
-	tunnels map[string]net.Conn
+	client agent.TunnelsClient
+	l      *logrus.Entry
 }
 
-func NewService(client gateway.ServiceClient) *Service {
+func NewService(client agent.TunnelsClient) *Service {
 	return &Service{
-		client:  client,
-		tunnels: make(map[string]net.Conn),
+		client: client,
+		l:      logrus.WithField("component", "tunnel"),
 	}
 }
 
-func (s *Service) CreateTunnel(req *agent.CreateTunnelRequest) (*agent.CreateTunnelResponse, error) {
-	c, err := net.Dial("tcp", req.Dial)
-	if err != nil {
-		return &agent.CreateTunnelResponse{
-			Error: err.Error(),
-		}, nil
+func (s *Service) runTunnel(ctx context.Context, stream agent.Tunnels_MakeClient, dial string) {
+	defer func() {
+		stream.CloseSend()
+
+		// drain stream
+		var recvErr error
+		for recvErr == nil {
+			_, recvErr = stream.Recv()
+		}
+	}()
+
+	// try to dial, send dial response in any case
+	l := s.l.WithField("dial", dial)
+	l.Info("Dialing...")
+	c, dialErr := net.Dial("tcp", dial)
+	var dialErrS string
+	if dialErr != nil {
+		dialErrS = dialErr.Error()
+	}
+	env := &agent.TunnelsEnvelopeFromAgent{
+		Payload: &agent.TunnelsEnvelopeFromAgent_DialResponse{
+			DialResponse: &agent.TunnelsDialResponse{
+				Error: dialErrS,
+			},
+		},
+	}
+	if err := stream.Send(env); err != nil {
+		l.Error(err)
+		return
+	}
+	if dialErr != nil {
+		l.Error(dialErr)
+		return
 	}
 
-	tunnelID := fmt.Sprintf("%s-%s-%d", c.LocalAddr().String(), c.RemoteAddr().String(), time.Now().UnixNano())
-	s.rw.Lock()
-	s.tunnels[tunnelID] = c
-	s.rw.Unlock()
+	conn := c.(*net.TCPConn)
+	var wg sync.WaitGroup
 
+	// receive messages until error, write to TCP connection
+	wg.Add(1)
 	go func() {
-		defer c.Close()
-
-		time.Sleep(time.Second) // FIXME HACK
+		defer func() {
+			conn.CloseWrite()
+			wg.Done()
+		}()
 
 		for {
-			b := make([]byte, 4096)
-			n, err := c.Read(b)
-			if err != nil {
-				logrus.Error(err)
+			env, recvErr := stream.Recv()
+			if recvErr != nil {
+				l.Error(recvErr)
 				return
 			}
-			if n == 0 {
-				continue
+			data := env.GetData()
+			if data == nil {
+				l.Errorf("Expected data, got %s.", env)
+				return
 			}
 
-			res, err := s.client.WriteToTunnel(&gateway.WriteToTunnelRequest{
-				TunnelId: tunnelID,
-				Data:     b[:n],
-			})
-			if err != nil {
-				logrus.Error(err)
-				return
+			if len(data.Data) != 0 {
+				l.Debugf("Writing %d bytes...", len(data.Data))
+				if _, writeErr := conn.Write(data.Data); writeErr != nil {
+					l.Error(writeErr)
+					return
+				}
 			}
-			if res.Error != "" {
-				logrus.Error(res.Error)
+			if data.Error != "" {
+				l.Error(data.Error)
 				return
 			}
 		}
 	}()
 
-	return &agent.CreateTunnelResponse{TunnelId: tunnelID}, nil
+	// read from TCP connection until error, send messages
+	wg.Add(1)
+	go func() {
+		defer func() {
+			stream.CloseSend()
+			conn.CloseRead()
+			wg.Done()
+		}()
+
+		for {
+			b := make([]byte, 4096)
+			n, readErr := conn.Read(b)
+			l.Debugf("Read %d bytes.", n)
+			var readErrS string
+			if readErr != nil {
+				readErrS = readErr.Error()
+			}
+			env := &agent.TunnelsEnvelopeFromAgent{
+				Payload: &agent.TunnelsEnvelopeFromAgent_Data{
+					Data: &agent.TunnelsData{
+						Error: readErrS,
+						Data:  b[:n],
+					},
+				},
+			}
+			if err := stream.Send(env); err != nil {
+				l.Error(err)
+				return
+			}
+			if readErr != nil {
+				l.Error(readErr)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 
-func (s *Service) WriteToTunnel(req *agent.WriteToTunnelRequest) (*agent.WriteToTunnelResponse, error) {
-	s.rw.RLock()
-	c := s.tunnels[req.TunnelId]
-	s.rw.RUnlock()
-	if c == nil {
-		return &agent.WriteToTunnelResponse{
-			Error: fmt.Sprintf("no such tunnel: %s", req.TunnelId),
-		}, nil
-	}
+func (s *Service) Run(ctx context.Context) {
+	defer s.l.Info("Done.")
 
-	if _, err := c.Write(req.Data); err != nil {
-		return &agent.WriteToTunnelResponse{
-			Error: err.Error(),
-		}, nil
+	for {
+		// make new stream
+		var stream agent.Tunnels_MakeClient
+		var err error
+		for stream == nil {
+			if ctx.Err() != nil {
+				s.l.Error(ctx.Err())
+				return
+			}
+
+			// TODO configure backoff
+			stream, err = s.client.Make(ctx)
+			if err != nil {
+				s.l.Error(err)
+			}
+		}
+
+		// wait for dial request, start tunnel
+		env, err := stream.Recv()
+		if err != nil {
+			s.l.Error(err)
+			stream.CloseSend()
+			continue
+		}
+		req := env.GetDialRequest()
+		if req == nil {
+			s.l.Errorf("Expected dial request, got %s.", env)
+			stream.CloseSend()
+			continue
+		}
+		go s.runTunnel(ctx, stream, req.Dial)
 	}
-	return &agent.WriteToTunnelResponse{}, nil
 }
-
-// check interfaces
-var _ agent.ServiceServer = (*Service)(nil)
