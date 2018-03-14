@@ -36,6 +36,7 @@ import (
 )
 
 const (
+	// FIXME remove
 	uuid = "baf4e293-9f1c-4b3f-9244-02c8f3f37d9d"
 )
 
@@ -62,18 +63,19 @@ func main() {
 
 	// Connect to pmm-gateway. Once gRPC connection is established, client reconnects automatically.
 	const addr = "127.0.0.1:8080"
-	l.Infof("Connecting to %s...", addr)
+	l.Infof("Connecting to pmm-gateway %s...", addr)
 	var conn *grpc.ClientConn
-	var err error
 	for conn == nil {
 		// TODO configure backoff
 		// TODO configure TLS
+		var err error
 		conn, err = grpc.Dial(addr, grpc.WithInsecure())
 		if err != nil {
-			l.Error(err)
+			// l.Error(err)
 		}
 	}
 	defer conn.Close()
+	l.Infof("Connected to pmm-gateway (%s).", conn.GetState())
 
 	var wg sync.WaitGroup
 	wg.Add(1)

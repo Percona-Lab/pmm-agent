@@ -18,6 +18,7 @@ package tunnel
 
 import (
 	"context"
+	"io"
 	"net"
 	"sync"
 
@@ -64,11 +65,11 @@ func (s *Service) runTunnel(ctx context.Context, stream agent.Tunnels_MakeClient
 		},
 	}
 	if err := stream.Send(env); err != nil {
-		l.Error(err)
+		l.Errorf("Failed to send message: %s", err)
 		return
 	}
 	if dialErr != nil {
-		l.Error(dialErr)
+		l.Errorf("Failed to dial: %s", dialErr)
 		return
 	}
 
@@ -86,7 +87,7 @@ func (s *Service) runTunnel(ctx context.Context, stream agent.Tunnels_MakeClient
 		for {
 			env, recvErr := stream.Recv()
 			if recvErr != nil {
-				l.Error(recvErr)
+				l.Errorf("Failed to receive message: %s.", recvErr)
 				return
 			}
 			data := env.GetData()
@@ -98,12 +99,12 @@ func (s *Service) runTunnel(ctx context.Context, stream agent.Tunnels_MakeClient
 			if len(data.Data) != 0 {
 				l.Debugf("Writing %d bytes...", len(data.Data))
 				if _, writeErr := conn.Write(data.Data); writeErr != nil {
-					l.Error(writeErr)
+					l.Errorf("Failed to write: %s.", writeErr)
 					return
 				}
 			}
 			if data.Error != "" {
-				l.Error(data.Error)
+				l.Errorf("Got error, exiting: %s.", data.Error)
 				return
 			}
 		}
@@ -135,11 +136,15 @@ func (s *Service) runTunnel(ctx context.Context, stream agent.Tunnels_MakeClient
 				},
 			}
 			if err := stream.Send(env); err != nil {
-				l.Error(err)
+				l.Errorf("Failed to send message: %s.", err)
 				return
 			}
 			if readErr != nil {
-				l.Error(readErr)
+				if readErr == io.EOF {
+					l.Info("Read closed.")
+				} else {
+					l.Errorf("Failed to read: %s.", readErr)
+				}
 				return
 			}
 		}
@@ -154,7 +159,6 @@ func (s *Service) Run(ctx context.Context) {
 	for {
 		// make new stream
 		var stream agent.Tunnels_MakeClient
-		var err error
 		for stream == nil {
 			if ctx.Err() != nil {
 				s.l.Error(ctx.Err())
@@ -162,16 +166,18 @@ func (s *Service) Run(ctx context.Context) {
 			}
 
 			// TODO configure backoff
+			var err error
 			stream, err = s.client.Make(ctx)
 			if err != nil {
-				s.l.Error(err)
+				s.l.Errorf("Failed to make new stream: %s.", err)
 			}
 		}
+		s.l.Debug("New stream created.")
 
 		// wait for dial request, start tunnel
 		env, err := stream.Recv()
 		if err != nil {
-			s.l.Error(err)
+			s.l.Errorf("Failed to receive message: %s.", err)
 			stream.CloseSend()
 			continue
 		}
@@ -181,6 +187,7 @@ func (s *Service) Run(ctx context.Context) {
 			stream.CloseSend()
 			continue
 		}
+		s.l.Debugf("Got dial request, starting tunnel to %s.", req.Dial)
 		go s.runTunnel(ctx, stream, req.Dial)
 	}
 }
