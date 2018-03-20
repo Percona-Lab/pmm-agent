@@ -21,6 +21,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/Percona-Lab/pmm-api/agent"
 	"github.com/sirupsen/logrus"
@@ -74,6 +75,10 @@ func (s *Service) runTunnel(ctx context.Context, stream agent.Tunnels_MakeClient
 	}
 
 	conn := c.(*net.TCPConn)
+	conn.SetKeepAlivePeriod(20 * time.Second)
+	conn.SetKeepAlive(true)
+	// TODO SetReadBuffer, SetWriteBuffer?
+
 	var wg sync.WaitGroup
 
 	// receive messages until error, write to TCP connection

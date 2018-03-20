@@ -69,9 +69,9 @@ func main() {
 		// TODO configure backoff
 		// TODO configure TLS
 		var err error
-		conn, err = grpc.Dial(addr, grpc.WithInsecure())
+		conn, err = grpc.DialContext(ctx, addr, grpc.WithInsecure())
 		if err != nil {
-			// l.Error(err)
+			l.Error(err)
 		}
 	}
 	defer conn.Close()
